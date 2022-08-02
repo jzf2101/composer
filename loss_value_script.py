@@ -1,3 +1,4 @@
+"""Runs mcli script to collect losses."""
 import argparse
 import os
 
@@ -18,6 +19,7 @@ key = '{}/checkpoints/ep0-ba{}-rank0'
 #iterations = np.arange(3500,68796, 3500).tolist() + [68796]
 
 if __name__ == "__main__":
+    """Runs job."""
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('checkpoint', type=int)
     parser.add_argument("run", help="run name", type=str)
@@ -35,5 +37,5 @@ if __name__ == "__main__":
         losses = cross_entropy(output['logits'].view(-1, trainer.state.model.config.vocab_size),
                                labels.view(-1),
                                reduction='none').view_as(labels).cpu().detach().numpy()
-        np.save('{}_iteration{}_batch{}.pt'.format(run, checkpoint, batch_idx), losses)
+        np.save('{}_iteration{}_batch{}.pt'.format(args.run, args.checkpoint, batch_idx), losses)
     trainer.close()
