@@ -1,0 +1,49 @@
+run_name: "bert-losses{mcli_sweep[parameters][save_folder]}{mcli_sweep[parameters][eval_batch_size]}"
+gpu_type: a100-80gb # gpu type
+gpu_num: 1 # number of GPUs
+platform: r1z1 # platform to use
+image: mosaicml/composer:v0.8.0
+integrations:
+  - integration_type: git_repo
+    git_repo: jzf2101/composer
+    git_branch: bert-loss
+    path: /composer # The folder to clone the code into
+
+inherits:
+  - common/model.yaml
+
+command:
+  pip install awscli
+  cd composer/
+  python loss_value_script.py -run {mcli_sweep[parameters][save_folder]} -checkpoint {mcli_sweep[parameters][eval_batch_size]}
+  mkdir {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}
+  mv *.pt {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}
+  tar czf {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}.tar.gz {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}
+  aws s3api put-object --bucket moin-md-test --key bert-losses/{mcli_sweep[parameters][save_folder]}{mcli_sweep[parameters][eval_batch_size]}.tar.gz --object {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}.tar.gz
+
+grid:
+    parameters.save_folder:
+        - 'bert-base-128-jzf-seed-0-o0hc'
+        - 'bert-base-128-jzf-seed-23-cpur'
+        - 'bert-base-128-jzf-seed-42-s5xi'
+    parameters.eval_batch_size:
+        - 3500
+        - 7000
+        - 10500
+        - 14000
+        - 17500
+        - 21000
+        - 24500
+        - 28000
+        - 31500
+        - 35000
+        - 38500
+        - 42000
+        - 45500
+        - 49000
+        - 52500
+        - 56000
+        - 59500
+        - 63000
+        - 66500
+        - 68796
