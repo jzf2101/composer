@@ -24,7 +24,7 @@ def rank_zero() -> bool:
 
 @pytest.fixture(autouse=True)
 def importor_skip_mlperf_logging():
-    pytest.importorskip("mlperf_logging")
+    pytest.importorskip('mlperf_logging')
 
 
 class MockMLLogger:
@@ -58,7 +58,6 @@ class TestMLPerfCallbackEvents:
 
         return state
 
-    @pytest.mark.timeout(5)
     def test_eval_start(self, mlperf_callback, mock_state):
         mlperf_callback.eval_start(mock_state, Mock())
 
@@ -68,7 +67,6 @@ class TestMLPerfCallbackEvents:
 
         assert mlperf_callback.mllogger.logs == [{'key': 'eval_start', 'value': None, 'metadata': {'epoch_num': 1}}]
 
-    @pytest.mark.timeout(5)
     def test_eval_end(self, mlperf_callback, mock_state):
         mlperf_callback.eval_end(mock_state, Mock())
 
@@ -92,7 +90,6 @@ class TestMLPerfCallbackEvents:
 class TestWithMLPerfChecker:
     """Ensures that the logs created by the MLPerfCallback pass the official package checker."""
 
-    @pytest.mark.timeout(15)
     def test_mlperf_callback_passes(self, tmp_path, monkeypatch, world_size, device):
 
         def mock_accuracy(self, state: State):
@@ -108,7 +105,6 @@ class TestWithMLPerfChecker:
         if rank_zero():
             self.run_mlperf_checker(tmp_path, monkeypatch)
 
-    @pytest.mark.timeout(15)
     def test_mlperf_callback_fails(self, tmp_path, monkeypatch, world_size, device):
 
         def mock_accuracy(self, state: State):
@@ -142,7 +138,7 @@ class TestWithMLPerfChecker:
                     dataset=RandomClassificationDataset(),
                     shuffle=False,
                 ),
-                max_duration="3ep",
+                max_duration='3ep',
                 deterministic_mode=True,
                 progress_bar=False,
                 log_to_console=False,
@@ -162,17 +158,17 @@ class TestWithMLPerfChecker:
             print(msg.format(*args))
             raise ValueError('MLPerf checker failed, see logs.')
 
-        monkeypatch.setattr(logging, "error", fail_on_error)
+        monkeypatch.setattr(logging, 'error', fail_on_error)
 
         from mlperf_logging.package_checker.package_checker import check_training_package
 
         check_training_package(
             folder=directory,
-            usage="training",
-            ruleset="1.1.0",
+            usage='training',
+            ruleset='1.1.0',
             werror=True,
             quiet=False,
             rcp_bypass=False,
             rcp_bert_train_samples=False,
-            log_output="package_checker.log",
+            log_output='package_checker.log',
         )

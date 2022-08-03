@@ -47,6 +47,7 @@ Attributes:
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import textwrap
@@ -61,13 +62,15 @@ import torch.backends.cudnn
 from composer.utils import dist
 
 __all__ = [
-    "configure_deterministic_mode",
-    "get_random_seed",
-    "seed_all",
-    "get_rng_state",
-    "load_rng_state",
-    "MAX_SEED",
+    'configure_deterministic_mode',
+    'get_random_seed',
+    'seed_all',
+    'get_rng_state',
+    'load_rng_state',
+    'MAX_SEED',
 ]
+
+log = logging.getLogger(__name__)
 
 # seeds must be 32-bit unsigned integers
 MAX_SEED = 2**32 - 1
@@ -112,8 +115,8 @@ def configure_deterministic_mode():
     torch.backends.cudnn.deterministic = True
     # See https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
     # and https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    warnings.warn("Deterministic mode is activated. This will negatively impact performance.", category=UserWarning)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    warnings.warn('Deterministic mode is activated. This will negatively impact performance.', category=UserWarning)
 
 
 def get_random_seed() -> int:
@@ -128,7 +131,7 @@ def get_random_seed() -> int:
     """
     rng = random.Random(int(time.time_ns()))  # get a new RNG does not respect the current seed
     seed = rng.randint(0, MAX_SEED)
-    assert seed >= 0 and seed <= MAX_SEED, "seed should be on this range"
+    assert seed >= 0 and seed <= MAX_SEED, 'seed should be on this range'
     return seed
 
 
@@ -152,7 +155,8 @@ def seed_all(seed: int):
         seed (int): The random seed
     """
     if seed < 0 or seed > MAX_SEED:
-        raise ValueError(f"Seed {seed} is invalid. It must be on [0; 2^32 - 1]")
+        raise ValueError(f'Seed {seed} is invalid. It must be on [0; 2^32 - 1]')
+    log.info('Setting seed to %d', seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -168,9 +172,9 @@ def get_rng_state() -> List[Dict[str, Any]]:
         List[Dict[str, Any]]: A list of RNG State Dicts, indexed by global rank.
     """
     rng_state = {
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch": torch.random.get_rng_state(),
+        'python': random.getstate(),
+        'numpy': np.random.get_state(),
+        'torch': torch.random.get_rng_state(),
     }
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         # This will not be compatible with model parallelism
@@ -206,7 +210,9 @@ def load_rng_state(rng_state_dicts: List[Dict[str, Any]]):
         np.random.set_state(rng_state_dict['numpy'])
 
         is_cuda_available = torch.cuda.is_available() and torch.cuda.is_initialized()
-        has_cuda_rng_state = "cuda" in rng_state_dict
+        has_cuda_rng_state = 'cuda' in rng_state_dict
+
+        log.debug('Restoring the RNG state')
 
         if is_cuda_available and has_cuda_rng_state:
             torch.cuda.set_rng_state(rng_state_dict['cuda'])

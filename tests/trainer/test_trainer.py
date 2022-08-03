@@ -6,6 +6,7 @@ import contextlib
 import copy
 import datetime
 import os
+import pathlib
 import time
 from typing import List, Optional, Union
 
@@ -17,6 +18,7 @@ from torchmetrics import Accuracy
 
 from composer import Callback, Evaluator, Trainer
 from composer.algorithms import CutOut, LabelSmoothing
+from composer.algorithms.gradient_clipping.gradient_clipping import GradientClipping
 from composer.callbacks import LRMonitor
 from composer.core.event import Event
 from composer.core.precision import Precision
@@ -30,8 +32,9 @@ from composer.loggers.logger import Logger
 from composer.models.base import ComposerModel
 from composer.optim.scheduler import ExponentialScheduler
 from composer.trainer.devices import Device
-from composer.trainer.trainer import _get_run_name
-from composer.utils import dist, reproducibility
+from composer.trainer.trainer import _generate_run_name
+from composer.utils import dist, is_model_deepspeed, reproducibility
+from composer.utils.iter_helpers import map_collection
 from tests.common import (RandomClassificationDataset, RandomImageDataset, SimpleConvModel, SimpleModel, device,
                           world_size)
 from tests.common.events import EventCounterCallback
@@ -74,8 +77,8 @@ class TestTrainerInit():
         assert isinstance(trainer.state.callbacks[2], LRMonitor)
 
     def test_invalid_device(self, model: ComposerModel):
-        with pytest.raises(ValueError, match="magic_device"):
-            Trainer(model=model, device="magic_device")
+        with pytest.raises(ValueError, match='magic_device'):
+            Trainer(model=model, device='magic_device')
 
     @device('gpu', 'cpu')
     def test_optimizer_params_on_device(
@@ -86,7 +89,7 @@ class TestTrainerInit():
         # Train a model
         train_dataloader = DataLoader(RandomClassificationDataset())
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        max_duration = "2ba"
+        max_duration = '2ba'
         trainer = Trainer(
             model=model,
             max_duration=max_duration,
@@ -96,9 +99,16 @@ class TestTrainerInit():
         trainer.fit()
 
         # Assert that the parameters are on the correct devices
-        parameters = trainer.state.optimizers[0].param_groups[0]["params"]
+        parameters = trainer.state.optimizers[0].param_groups[0]['params']
         target_device = 'cuda' if device == 'gpu' else 'cpu'
         assert all(param.device.type == target_device for param in parameters)
+
+
+def _assert_optimizer_is_on_device(optimizer: torch.optim.Optimizer):
+    for state in optimizer.state.values():
+        for v in state.values():
+            if isinstance(v, torch.Tensor):
+                assert v.device.type == 'cuda'
 
 
 class TestTrainerInitOrFit:
@@ -116,8 +126,8 @@ class TestTrainerInitOrFit:
     def max_duration(self):
         return Time(1, TimeUnit.EPOCH)
 
-    @pytest.mark.parametrize("train_subset_num_batches", [-1, 1])
-    @pytest.mark.parametrize("compute_training_metrics", [True, False])
+    @pytest.mark.parametrize('train_subset_num_batches', [-1, 1])
+    @pytest.mark.parametrize('compute_training_metrics', [True, False])
     def test_train_dataloader(
         self,
         train_dataloader: DataLoader,
@@ -153,7 +163,7 @@ class TestTrainerInitOrFit:
         # Assert that the states are equivalent
         assert_state_equivalent(init_trainer.state, fit_trainer.state)
 
-    @pytest.mark.parametrize("max_duration", [1, "1ep", "1ba", Time(1, TimeUnit.EPOCH)])
+    @pytest.mark.parametrize('max_duration', [1, '1ep', '1ba', Time(1, TimeUnit.EPOCH)])
     def test_max_duration(
         self,
         train_dataloader: DataLoader,
@@ -181,11 +191,11 @@ class TestTrainerInitOrFit:
         # Assert that the states are equivalent
         assert_state_equivalent(init_trainer.state, fit_trainer.state)
 
-    @pytest.mark.parametrize("reset_time", [True, False])
-    @pytest.mark.parametrize("new_duration", [
-        Time.from_timestring("1ep"),
-        Time.from_timestring("1ba"),
-        Time.from_timestring("2ep"),
+    @pytest.mark.parametrize('reset_time', [True, False])
+    @pytest.mark.parametrize('new_duration', [
+        Time.from_timestring('1ep'),
+        Time.from_timestring('1ba'),
+        Time.from_timestring('2ep'),
         None,
     ])
     def test_reset_time(
@@ -208,7 +218,7 @@ class TestTrainerInitOrFit:
         first_timestamp = trainer.state.timestamp
 
         # It should error if the time is not being reset. Otherwise, it should be reset and train OK.
-        error_msg = "Please provide the `duration` or specify `reset_time=True`"
+        error_msg = 'Please provide the `duration` or specify `reset_time=True`'
         ctx = pytest.raises(ValueError,
                             match=error_msg) if not new_duration and not reset_time else contextlib.nullcontext()
         with ctx:
@@ -228,8 +238,8 @@ class TestTrainerInitOrFit:
                 first_timestamp_in_new_unit = getattr(first_timestamp, new_duration.unit.name.lower())
                 assert trainer.state.timestamp.get(new_duration.unit) == first_timestamp_in_new_unit + new_duration
 
-    @pytest.mark.parametrize("scale_schedule_ratio", [1.0, 2.0])
-    @pytest.mark.parametrize("step_schedulers_every_batch", [None, True, False])
+    @pytest.mark.parametrize('scale_schedule_ratio', [1.0, 2.0])
+    @pytest.mark.parametrize('step_schedulers_every_batch', [None, True, False])
     def test_schedulers(
         self,
         train_dataloader: DataLoader,
@@ -268,10 +278,10 @@ class TestTrainerInitOrFit:
         # Assert that the states are equivalent
         assert_state_equivalent(init_trainer.state, fit_trainer.state)
 
-    @pytest.mark.parametrize("eval_subset_num_batches", [-1, 1])
-    @pytest.mark.parametrize("eval_interval", ["1ep", "1ba"])
+    @pytest.mark.parametrize('eval_subset_num_batches', [-1, 1])
+    @pytest.mark.parametrize('eval_interval', ['1ep', '1ba'])
     @pytest.mark.parametrize(
-        "eval_dataloader",
+        'eval_dataloader',
         [
             DataLoader(RandomClassificationDataset(size=2)),  # a normal dataloader
             Evaluator(label='eval', dataloader=DataLoader(RandomClassificationDataset(size=2)),
@@ -360,7 +370,7 @@ class TestTrainerInitOrFit:
         assert_state_equivalent(init_trainer.state, fit_trainer.state)
 
     @pytest.mark.gpu
-    @pytest.mark.parametrize("precision", list(Precision))
+    @pytest.mark.parametrize('precision', list(Precision))
     def test_deepspeed(
         self,
         model: ComposerModel,
@@ -368,9 +378,6 @@ class TestTrainerInitOrFit:
         max_duration: Time[int],
         train_dataloader: DataLoader,
     ):
-        if precision == Precision.BF16:
-            pytest.importorskip("torch", minversion="1.10", reason="BF16 precision requires PyTorch 1.10+")
-
         trainer = Trainer(
             model=model,
             precision=precision,
@@ -379,12 +386,52 @@ class TestTrainerInitOrFit:
             train_dataloader=train_dataloader,
         )
 
-        assert trainer.state.is_model_deepspeed
+        assert is_model_deepspeed(trainer.state.model)
 
+        assert trainer.state.deepspeed_enabled
         trainer.fit()
 
-    @pytest.mark.parametrize("precision", list(Precision))
-    @pytest.mark.parametrize("device", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+    @pytest.mark.gpu
+    def test_device(
+        self,
+        model: ComposerModel,
+        max_duration: Time[int],
+        train_dataloader: DataLoader,
+    ):
+        trainer = Trainer(model=model, device='gpu', max_duration=max_duration, train_dataloader=train_dataloader)
+        # Run fit to ensure there are no device mismatches
+        trainer.fit()
+
+        # Finally assert the devices are correct
+        assert all(p.device.type == 'cuda' for p in trainer.state.model.parameters())
+        map_collection(trainer.state.optimizers, _assert_optimizer_is_on_device)
+
+    @pytest.mark.gpu
+    def test_device_with_checkpoint(
+        self,
+        model: ComposerModel,
+        tmp_path: pathlib.Path,
+        max_duration: Time[int],
+        train_dataloader: DataLoader,
+    ):
+        copied_model = copy.deepcopy(model)
+        trainer = Trainer(model=model, device='gpu', max_duration=max_duration, train_dataloader=train_dataloader)
+        checkpoint_path = str(tmp_path / 'checkpoint.pt')
+        trainer.save_checkpoint(checkpoint_path)
+
+        trainer_2 = Trainer(model=copied_model,
+                            load_path=checkpoint_path,
+                            max_duration=max_duration,
+                            train_dataloader=train_dataloader)
+        # Run fit to ensure there are no device mismatches
+        trainer_2.fit(reset_time=True)
+
+        # And ensure the device on the new trainer is correct
+        assert all(p.device.type == 'cuda' for p in trainer_2.state.model.parameters())
+        map_collection(trainer_2.state.optimizers, _assert_optimizer_is_on_device)
+
+    @pytest.mark.parametrize('precision', list(Precision))
+    @pytest.mark.parametrize('device', ['cpu', pytest.param('gpu', marks=pytest.mark.gpu)])
     def test_precision(
         self,
         model: ComposerModel,
@@ -396,16 +443,13 @@ class TestTrainerInitOrFit:
         # Copy the model so the fit_trainer can start with the same parameter values as the init_trainer
         copied_model = copy.deepcopy(model)
 
-        if precision == Precision.BF16:
-            pytest.importorskip("torch", minversion="1.10", reason="BF16 precision requires PyTorch 1.10+")
-
         should_error = False
         ctx = contextlib.nullcontext()
-        if device == "cpu" and precision != Precision.FP32:
-            ctx = pytest.raises(ValueError, match="not supproted for CPU training")
+        if device == 'cpu' and precision != Precision.FP32:
+            ctx = pytest.raises(ValueError, match='not supproted for CPU training')
             should_error = True
         elif precision == Precision.FP16:
-            ctx = pytest.raises(ValueError, match="FP16 precision is only supported when training with DeepSpeed")
+            ctx = pytest.raises(ValueError, match='FP16 precision is only supported when training with DeepSpeed')
             should_error = True
 
         with ctx:
@@ -434,38 +478,40 @@ class TestTrainerInitOrFit:
         if not should_error:
             assert_state_equivalent(init_trainer.state, fit_trainer.state)
 
-    @pytest.mark.parametrize("grad_clip_norm", [-1.0, 1.0])
+    @pytest.mark.parametrize('grad_clip_norm,context_manager', [(-1.0, contextlib.nullcontext),
+                                                                (1.0, pytest.deprecated_call)])
     def test_grad_clip_norm(
         self,
         train_dataloader: DataLoader,
         model: ComposerModel,
         max_duration: Time[int],
         grad_clip_norm: float,
+        context_manager,
     ):
         # Copy the model so the fit_trainer can start with the same parameter values as the init_trainer
         copied_model = copy.deepcopy(model)
-
-        # Train once with the grad_clip_norm param on Trainer.__init__()
-        init_trainer = Trainer(
-            model=model,
-            max_duration=max_duration,
-            train_dataloader=train_dataloader,
-            grad_clip_norm=grad_clip_norm,
-        )
+        with context_manager():
+            # Train once with the grad_clip_norm param on Trainer.__init__()
+            init_trainer = Trainer(
+                model=model,
+                max_duration=max_duration,
+                train_dataloader=train_dataloader,
+                grad_clip_norm=grad_clip_norm,
+            )
         init_trainer.fit()
-
-        # Train again with the grad_clip_norm param specified on Trainer.fit()
-        fit_trainer = Trainer(
-            model=copied_model,
-            max_duration=max_duration,
-            train_dataloader=train_dataloader,
-        )
-        fit_trainer.fit(grad_clip_norm=grad_clip_norm)
+        algorithms = [] if grad_clip_norm <= 0 else [
+            GradientClipping(clipping_type='norm', clipping_threshold=grad_clip_norm)
+        ]
+        # Train again with the grad_clip_norm specified using an algorithm
+        algo_trainer = Trainer(model=copied_model,
+                               max_duration=max_duration,
+                               train_dataloader=train_dataloader,
+                               algorithms=algorithms)
+        algo_trainer.fit()
 
         # Assert that the states are equivalent
-        assert_state_equivalent(init_trainer.state, fit_trainer.state)
+        assert_state_equivalent(init_trainer.state, algo_trainer.state)
 
-    @pytest.mark.timeout(5.0)
     def test_dataloader_active_iterator_error(self, model: ComposerModel):
         dataloader = DataLoader(
             dataset=RandomClassificationDataset(),
@@ -477,14 +523,14 @@ class TestTrainerInitOrFit:
         _ = next(dataloader.__iter__())
 
         # Assert the error is raised if the dataloader is specified in init
-        with pytest.raises(ValueError, match="active iterator"):
+        with pytest.raises(ValueError, match='active iterator'):
             Trainer(
                 model=model,
                 train_dataloader=dataloader,
             )
 
         # Or if the dataloader is specified on fit
-        with pytest.raises(ValueError, match="active iterator"):
+        with pytest.raises(ValueError, match='active iterator'):
             trainer = Trainer(model=model)
             trainer.fit(train_dataloader=dataloader)
 
@@ -511,8 +557,7 @@ class TestTrainerInitOrFit:
 
         assert trainer.state.timestamp.get(max_duration.unit) == 2 * max_duration
 
-    @pytest.mark.timeout(10)
-    @pytest.mark.parametrize("eval_interval", ["1ba", "1ep"])
+    @pytest.mark.parametrize('eval_interval', ['1ba', '1ep'])
     def test_eval_is_excluded_from_wct_tracking(
         self,
         train_dataloader: DataLoader,
@@ -533,7 +578,7 @@ class TestTrainerInitOrFit:
             eval_dataloader=DataLoader(dataset=RandomClassificationDataset(), batch_size=2),
             callbacks=[sleepy_callback, event_counter_callback],
             eval_interval=eval_interval,
-            max_duration="2ep",
+            max_duration='2ep',
             eval_subset_num_batches=1,
         )
 
@@ -541,7 +586,7 @@ class TestTrainerInitOrFit:
         trainer.fit()
 
         # Validate that eval was called
-        expected_num_evals = 4 if eval_interval == "1ba" else 2
+        expected_num_evals = 4 if eval_interval == '1ba' else 2
         assert event_counter_callback.event_to_num_calls[Event.EVAL_START] == expected_num_evals
 
         # Validate the timestamps.
@@ -560,7 +605,7 @@ class TestTrainerInitOrFit:
         trainer = Trainer(
             model=model,
             train_dataloader=train_dataloader,
-            max_duration="1ba",
+            max_duration='1ba',
         )
 
         trainer.fit()
@@ -587,7 +632,7 @@ class TestTrainerInitOrFit:
         dist.broadcast(rank_zero_timestamp_tensor, src=0)
         assert torch.all(my_timestamp_tensor == rank_zero_timestamp_tensor)
 
-    @pytest.mark.parametrize("unit", [TimeUnit.EPOCH, TimeUnit.BATCH, TimeUnit.SAMPLE])
+    @pytest.mark.parametrize('unit', [TimeUnit.EPOCH, TimeUnit.BATCH, TimeUnit.SAMPLE])
     def test_training_duration_unit(
         self,
         train_dataloader: DataLoader,
@@ -618,7 +663,7 @@ class TestTrainerInitOrFit:
         assert train_dataloader.dataset is not None
         assert isinstance(train_dataloader.dataset, collections.abc.Sized)
         num_samples_per_epoch = len(train_dataloader.dataset)
-        assert num_samples_per_epoch % batch_size == 0, "This test assumes no drop_last"
+        assert num_samples_per_epoch % batch_size == 0, 'This test assumes no drop_last'
 
         # Determine the duration (given the unit) and the number of calls to .fit()
         # to train 1 epoch
@@ -632,7 +677,7 @@ class TestTrainerInitOrFit:
             duration = Time.from_epoch(1)
             num_steps_per_epoch = 1
         else:
-            raise ValueError(f"Unsupported unit: {unit}")
+            raise ValueError(f'Unsupported unit: {unit}')
 
         current_epoch_time = datetime.timedelta(seconds=0)
 
@@ -730,7 +775,6 @@ class TestTrainerInitOrFit:
 
 @world_size(1, 2)
 @device('cpu', 'gpu', 'gpu-amp', precision=True)
-@pytest.mark.timeout(15)  # higher timeout since each model is trained twice
 class TestTrainerEquivalence():
 
     default_threshold = {'atol': 0, 'rtol': 0}
@@ -741,9 +785,9 @@ class TestTrainerEquivalence():
         if threshold is None:
             threshold = self.default_threshold
 
-        assert model_1 is not model_2, "Same model should not be compared."
+        assert model_1 is not model_2, 'Same model should not be compared.'
         for param1, param2 in zip(model_1.parameters(), model_2.parameters()):
-            torch.testing.assert_allclose(param1, param2, **threshold)
+            torch.testing.assert_close(param1, param2, **threshold)
 
     @pytest.fixture
     def config(self, device: Device, precision: Precision, world_size: int, rank_zero_seed: int):
@@ -768,11 +812,11 @@ class TestTrainerEquivalence():
         }
 
     @pytest.fixture(autouse=True)
-    def create_reference_model(self, config, tmp_path_factory, *args):
+    def create_reference_model(self, config, tmp_path_factory: pytest.TempPathFactory, *args):
         """Trains the reference model, and saves checkpoints."""
         config = copy.deepcopy(config)  # ensure the reference model is not passed to tests
 
-        save_folder = tmp_path_factory.mktemp("{device}-{precision}".format(**config))
+        save_folder = tmp_path_factory.mktemp('{device}-{precision}'.format(**config))
         config.update({'save_interval': '1ep', 'save_folder': str(save_folder), 'save_filename': 'ep{epoch}.pt'})
 
         trainer = Trainer(**config)
@@ -805,7 +849,7 @@ class TestTrainerEquivalence():
         self.assert_models_equal(trainer.state.model, self.reference_model, threshold=threshold)
 
     def test_max_duration(self, config, *args):
-        num_batches = 2 * len(config["train_dataloader"])  # convert 2ep to batches
+        num_batches = 2 * len(config['train_dataloader'])  # convert 2ep to batches
         config['max_duration'] = f'{num_batches}ba'
 
         trainer = Trainer(**config)
@@ -814,11 +858,12 @@ class TestTrainerEquivalence():
 
     def test_checkpoint(self, config, *args):
         # load from epoch 1 checkpoint and finish training
+        assert self.reference_folder is not None
         checkpoint_file = os.path.join(self.reference_folder, 'ep1.pt')
         config['load_path'] = checkpoint_file
 
         trainer = Trainer(**config)
-        assert trainer.state.timestamp.epoch == "1ep"  # ensure checkpoint state loaded
+        assert trainer.state.timestamp.epoch == '1ep'  # ensure checkpoint state loaded
         trainer.fit()
 
         self.assert_models_equal(trainer.state.model, self.reference_model)
@@ -904,7 +949,6 @@ class TestTrainerEvents():
 
 
 @pytest.mark.vision
-@pytest.mark.timeout(30)
 class TestFFCVDataloaders:
 
     train_file = None
@@ -914,11 +958,11 @@ class TestFFCVDataloaders:
     @pytest.fixture(autouse=True)
     def create_dataset(self, tmp_path_factory: pytest.TempPathFactory):
         dataset_train = RandomImageDataset(size=16, is_PIL=True)
-        self.tmp_path = tmp_path_factory.mktemp("ffcv")
-        output_train_file = str(self.tmp_path / "train.ffcv")
+        self.tmp_path = tmp_path_factory.mktemp('ffcv')
+        output_train_file = str(self.tmp_path / 'train.ffcv')
         write_ffcv_dataset(dataset_train, write_path=output_train_file, num_workers=1, write_mode='proportion')
         dataset_val = RandomImageDataset(size=16, is_PIL=True)
-        output_val_file = str(self.tmp_path / "val.ffcv")
+        output_val_file = str(self.tmp_path / 'val.ffcv')
         write_ffcv_dataset(dataset_val, write_path=output_val_file, num_workers=1, write_mode='proportion')
         self.train_file = output_train_file
         self.val_file = output_val_file
@@ -939,8 +983,8 @@ class TestFFCVDataloaders:
         try:
             import ffcv
         except ImportError as e:
-            raise ImportError(("Composer was installed without ffcv support. "
-                               "To use ffcv with Composer, please install ffcv in your environment.")) from e
+            raise ImportError(('Composer was installed without ffcv support. '
+                               'To use ffcv with Composer, please install ffcv in your environment.')) from e
         train_dataloader = self._get_dataloader(is_train=True)
         val_dataloader = self._get_dataloader(is_train=False)
         assert isinstance(train_dataloader, ffcv.Loader)
@@ -969,7 +1013,7 @@ def test_state_run_name():
     # seeding with the global rank to ensure that each rank has a different seed
     reproducibility.seed_all(dist.get_global_rank())
 
-    run_name = _get_run_name(None)
+    run_name = _generate_run_name()
     # The run name should be the same on every rank -- it is set via a distributed reduction
     # Manually verify that all ranks have the same run name
     run_names = dist.all_gather_object(run_name)

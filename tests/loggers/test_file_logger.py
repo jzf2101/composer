@@ -26,15 +26,14 @@ class FileArtifactLoggerTracker(LoggerDestination):
         self.logged_artifacts.append((log_level, artifact_name, file_path))
 
 
-@pytest.mark.parametrize("log_level", [LogLevel.EPOCH, LogLevel.BATCH])
-@pytest.mark.timeout(30)
+@pytest.mark.parametrize('log_level', [LogLevel.EPOCH, LogLevel.BATCH])
 def test_file_logger(dummy_state: State, log_level: LogLevel, tmp_path: pathlib.Path):
-    log_file_name = os.path.join(tmp_path, "output.log")
+    log_file_name = os.path.join(tmp_path, 'output.log')
     log_destination = FileLogger(
         log_interval=3,
         log_level=log_level,
         filename=log_file_name,
-        artifact_name="{run_name}/rank{rank}.log",
+        artifact_name='{run_name}/rank{rank}.log',
         buffer_size=1,
         flush_interval=1,
     )
@@ -53,21 +52,21 @@ def test_file_logger(dummy_state: State, log_level: LogLevel, tmp_path: pathlib.
     dummy_state.timestamp = dummy_state.timestamp.to_next_epoch()
     log_destination.run_event(Event.EPOCH_END, dummy_state, logger)
     log_destination.run_event(Event.EPOCH_START, dummy_state, logger)
-    logger.data_fit({"metric": "fit"})  # should print
-    logger.data_epoch({"metric": "epoch"})  # should print on batch level, since epoch calls are always printed
-    logger.data_batch({"metric": "batch"})  # should print on batch level, since we print every 3 steps
+    logger.data_fit({'metric': 'fit'})  # should print
+    logger.data_epoch({'metric': 'epoch'})  # should print on batch level, since epoch calls are always printed
+    logger.data_batch({'metric': 'batch'})  # should print on batch level, since we print every 3 steps
     dummy_state.timestamp = dummy_state.timestamp.to_next_epoch()
     log_destination.run_event(Event.EPOCH_END, dummy_state, logger)
     log_destination.run_event(Event.EPOCH_START, dummy_state, logger)
-    logger.data_epoch({"metric": "epoch1"})  # should print, since we log every 3 epochs
+    logger.data_epoch({'metric': 'epoch1'})  # should print, since we log every 3 epochs
     dummy_state.timestamp = dummy_state.timestamp.to_next_epoch()
     log_destination.run_event(Event.EPOCH_END, dummy_state, logger)
     log_destination.run_event(Event.EPOCH_START, dummy_state, logger)
     log_destination.run_event(Event.BATCH_START, dummy_state, logger)
     dummy_state.timestamp = dummy_state.timestamp.to_next_batch()
     log_destination.run_event(Event.BATCH_START, dummy_state, logger)
-    logger.data_epoch({"metric": "epoch2"})  # should print on batch level, since epoch calls are always printed
-    logger.data_batch({"metric": "batch1"})  # should NOT print
+    logger.data_epoch({'metric': 'epoch2'})  # should print on batch level, since epoch calls are always printed
+    logger.data_batch({'metric': 'batch1'})  # should NOT print
     dummy_state.timestamp = dummy_state.timestamp.to_next_batch()
     log_destination.run_event(Event.BATCH_END, dummy_state, logger)
     dummy_state.timestamp = dummy_state.timestamp.to_next_epoch()
@@ -102,17 +101,16 @@ def test_file_logger(dummy_state: State, log_level: LogLevel, tmp_path: pathlib.
             dummy_state.timestamp.epoch) + int(dummy_state.timestamp.epoch) + 1
 
 
-@pytest.mark.timeout(15)  # disk can be slow on Jenkins
 def test_file_logger_capture_stdout_stderr(dummy_state: State, tmp_path: pathlib.Path):
-    log_file_name = os.path.join(tmp_path, "output.log")
+    log_file_name = os.path.join(tmp_path, 'output.log')
     log_destination = FileLogger(filename=log_file_name,
                                  buffer_size=1,
                                  flush_interval=1,
                                  capture_stderr=True,
                                  capture_stdout=True)
     # capturing should start immediately
-    print("Hello, stdout!\nExtra Line")
-    print("Hello, stderr!\nExtra Line2", file=sys.stderr)
+    print('Hello, stdout!\nExtra Line')
+    print('Hello, stderr!\nExtra Line2', file=sys.stderr)
     logger = Logger(dummy_state, destinations=[log_destination])
     log_destination.run_event(Event.INIT, dummy_state, logger)
     log_destination.run_event(Event.EPOCH_START, dummy_state, logger)
@@ -132,7 +130,7 @@ class ExceptionRaisingCallback(Callback):
 
     def fit_start(self, state: State, logger: Logger) -> None:
         del state, logger  # unused
-        raise RuntimeError("My Exception!")
+        raise RuntimeError('My Exception!')
 
 
 def test_exceptions_are_printed(tmp_path: pathlib.Path):
@@ -141,7 +139,7 @@ def test_exceptions_are_printed(tmp_path: pathlib.Path):
     # Here, we construct a trainer that raises an exception on Event.FIT_START
     # and assert that the exception is written to the logfile
     exception_raising_callback = ExceptionRaisingCallback()
-    logfile_name = str(tmp_path / "logfile.txt")
+    logfile_name = str(tmp_path / 'logfile.txt')
     file_logger = FileLogger(filename=logfile_name, capture_stderr=True)
     dataloader = DataLoader(RandomClassificationDataset())
     model = SimpleModel()
@@ -165,12 +163,12 @@ def test_exceptions_are_printed(tmp_path: pathlib.Path):
 
     trainer.close()
 
-    with open(logfile_name, "r") as f:
+    with open(logfile_name, 'r') as f:
         log_lines = f.readlines()
-        assert "[stderr]: RuntimeError: My Exception!\n" == log_lines[-1]
+        assert '[stderr]: RuntimeError: My Exception!\n' == log_lines[-1]
 
     # Since the trainer was closed, future prints should not appear in the file logger
-    print("SHOULD NOT BE CAPTURED")
-    with open(logfile_name, "r") as f:
+    print('SHOULD NOT BE CAPTURED')
+    with open(logfile_name, 'r') as f:
         logfile = f.read()
-        assert "SHOULD NOT BE CAPTURED" not in logfile
+        assert 'SHOULD NOT BE CAPTURED' not in logfile
