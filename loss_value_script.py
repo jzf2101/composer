@@ -24,7 +24,7 @@ if __name__ == "__main__":
     parser.add_argument("run", help="run name", type=str)
     parser.add_argument('checkpoint', type=int)
     args = parser.parse_args()
-    hparams = TrainerHparams.create(f='load_bert.yaml')
+    hparams = TrainerHparams.create(f='yamls/models/load_bert.yaml')
     hparams.load_path = key.format(args.run, args.checkpoint)
     trainer = hparams.initialize_object()
     trainer.state.model.eval()

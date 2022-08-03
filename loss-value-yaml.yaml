@@ -15,7 +15,7 @@ inherits:
 command:
   pip install awscli
   cd composer/
-  python loss_value_script.py -run {mcli_sweep[parameters][save_folder]} -checkpoint {mcli_sweep[parameters][eval_batch_size]}
+  python loss_value_script.py {mcli_sweep[parameters][save_folder]} {mcli_sweep[parameters][eval_batch_size]}
   mkdir {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}
   mv *.pt {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}
   tar czf {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}.tar.gz {mcli_sweep[parameters][save_folder]}-{mcli_sweep[parameters][eval_batch_size]}
