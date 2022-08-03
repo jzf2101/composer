@@ -21,8 +21,8 @@ key = '{}/checkpoints/ep0-ba{}-rank0'
 if __name__ == "__main__":
     """Runs job."""
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('checkpoint', type=int)
     parser.add_argument("run", help="run name", type=str)
+    parser.add_argument('checkpoint', type=int)
     args = parser.parse_args()
     hparams = TrainerHparams.create(f='load_bert.yaml')
     hparams.load_path = key.format(args.run, args.checkpoint)
