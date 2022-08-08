@@ -27,6 +27,7 @@ if __name__ == "__main__":
     hparams = TrainerHparams.create(f='composer/yamls/models/load_bert.yaml')
     hparams.load_path = key.format(args.run, args.checkpoint)
     trainer = hparams.initialize_object()
+    print('loaded trainer')
     trainer.state.model.eval()
     for batch_idx, trainer.state.batch in enumerate(trainer._iter_dataloader()):
         trainer.state.batch = trainer._device.batch_to_device(trainer.state.batch)
@@ -34,6 +35,8 @@ if __name__ == "__main__":
         labels = trainer.state.batch.pop('labels')
         with torch.no_grad():
             output = trainer.state.model.forward(trainer.state.batch)
+        # loss_fct = CrossEntropyLoss()  # -100 index = padding token
+        # masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
         losses = cross_entropy(output['logits'].view(-1, trainer.state.model.config.vocab_size),
                                labels.view(-1),
                                reduction='none').view_as(labels).cpu().detach().numpy()

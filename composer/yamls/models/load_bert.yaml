@@ -64,7 +64,7 @@ schedulers:
     alpha_f: 0.02
 
 max_duration: 275184000sp          # Subsample the training data for 275M samples
-train_batch_size: 1000             # Number of training examples to use per update
+train_batch_size: 2000             # Number of training examples to use per update
 eval_batch_size: 2000
 
 precision: amp                     # Use mixed-precision training
@@ -85,4 +85,4 @@ load_object_store:
     s3:
       bucket: mosaicml-internal-checkpoints-bert
 load_weights_only: true
-load_strict_model_weights: false
+load_strict_model_weights: true
