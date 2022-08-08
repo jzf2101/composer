@@ -18,10 +18,10 @@ key = '{}/checkpoints/ep0-ba{}-rank0'
 
 #iterations = np.arange(3500,68796, 3500).tolist() + [68796]
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     """Runs job."""
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument("run", help="run name", type=str)
+    parser.add_argument('run', help='run name', type=str)
     parser.add_argument('checkpoint', type=int)
     args = parser.parse_args()
     hparams = TrainerHparams.create(f='composer/yamls/models/load_bert.yaml')
