@@ -31,7 +31,7 @@ from composer.core import (Algorithm, Callback, DataSpec, Engine, Evaluator, Eve
                            ensure_data_spec, ensure_evaluator, ensure_time)
 from composer.core.precision import get_precision_context
 from composer.core.time import TimeUnit
-from composer.core.types import Batch, PyTorchScheduler
+from composer.core.types import Batch, PyTorchScheduler, TrainerMode
 from composer.loggers import Logger, LoggerDestination, LogLevel, ProgressBarLogger
 from composer.models.base import ComposerModel
 from composer.optim.decoupled_weight_decay import DecoupledSGDW
@@ -41,7 +41,7 @@ from composer.trainer._deepspeed import _fix_batch_precision_for_deepspeed, _par
 from composer.trainer._scale_schedule import scale_pytorch_scheduler
 from composer.trainer._scaler import ClosureGradScaler
 from composer.trainer.ddp import DDPSyncStrategy, ddp_sync_context, prepare_ddp_module
-from composer.trainer.devices import Device, DeviceCPU, DeviceGPU
+from composer.trainer.devices import Device, DeviceCPU, DeviceGPU, DeviceTPU
 from composer.utils import (ObjectStore, dist, ensure_tuple, format_name_with_dist, is_model_deepspeed, map_collection,
                             reproducibility)
 from composer.utils.checkpoint import load_checkpoint, save_checkpoint
@@ -172,8 +172,14 @@ def _get_device(device: Optional[Union[str, Device]]):
             device = DeviceCPU()
         elif device.lower() == 'gpu':
             device = DeviceGPU()
+        elif device.lower() == 'tpu':
+            if not _is_tpu_installed:  # type: ignore
+                raise ImportError(
+                    'Unable to import torch_xla. Please follow installation instructions at https://github.com/pytorch/xla'
+                )
+            device = DeviceTPU()
         else:
-            raise ValueError(f'device ({device}) must be one of (cpu, gpu).')
+            raise ValueError(f'device ({device}) must be one of (cpu, gpu, tpu).')
     return device
 
 
@@ -216,6 +222,21 @@ def _generate_run_name() -> str:
     dist.broadcast_object_list(run_name_list)
     generated_run_name = run_name_list[0]
     return generated_run_name
+
+
+def _is_tpu_installed() -> bool:
+    try:
+        import torch_xla.core.xla_model as xm
+        del xm
+    except ImportError:
+        return False
+    else:
+        return True
+
+
+if _is_tpu_installed():
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.parallel_loader as pl
 
 
 class Trainer:
@@ -545,7 +566,7 @@ class Trainer:
             This parameter has no effect if ``save_folder`` is ``None``.
             (default: ``"{run_name}/checkpoints/ep{epoch}-ba{batch}-rank{rank}"``)
 
-            .. seealso:: :class:`~.CheckpointSaver`
+            .. seealso:: :class:`~.CheckpointSaver` and :doc:`Artifact Logging</trainer/artifact_logging>` notes.
         save_latest_filename (str, optional): A format string for the name of a symlink
             (relative to ``save_folder``) that points to the last saved checkpoint.
             This parameter has no effect if ``save_folder`` is ``None``.
@@ -556,7 +577,7 @@ class Trainer:
             This parameter has no effect if ``save_folder``, ``save_latest_filename``, or ``save_artifact_name`` are ``None``.
             To disable symlinking in logger, set this or ``save_latest_filename`` to ``None``. (default: ``"{run_name}/checkpoints/latest-rank{rank}"``)
 
-            .. seealso:: :class:`~.CheckpointSaver`
+            .. seealso:: :class:`~.CheckpointSaver` and :doc:`Artifact Logging</trainer/artifact_logging>` notes.
         save_overwrite (bool, optional): Whether existing checkpoints should be overridden.
             This parameter has no effect if ``save_folder`` is None. (default: ``False``)
 
@@ -574,7 +595,7 @@ class Trainer:
             are removed first. Set to ``-1`` to keep all checkpoints locally. (default: ``-1``)
 
             Checkpoints will be removed after they have been logged as a file artifact. For example, when this callback
-            is used in conjunction with the :class:`~composer.loggers.object_store_logger.ObjectStoreLogger`, set this
+            is used in conjunction with the :class:`.ObjectStoreLogger`, set this
             parameter to ``0`` to immediately delete checkpoints from the local disk after they have been uploaded to
             the object store.
 
@@ -786,16 +807,24 @@ class Trainer:
             raise NotImplementedError(f'Only one optimizer is supported; found {num_optimizers} optimizers')
 
         # Move the model and optimizers to the device
+
         if not deepspeed_enabled:
-            model = self._device.module_to_device(model)
-            # Move any remaining optimizer parameters onto the device
-            # It is possible that optimizer initialize created some internal tensors on CPU
-            # that need to be moved onto GPU.
+            # check if model is already on tpu
+            if isinstance(self._device, DeviceTPU) and 'xla' not in str(next(model.parameters()).device):
+                raise ValueError(
+                    'Use model.to(xm.xla_device()) to set the model to the TPU before providing to the trainer.')
+            else:
+                model = self._device.module_to_device(model)
+                # Move any remaining optimizer parameters onto the device
+                # It is possible that optimizer initialize created some internal tensors on CPU
+                # that need to be moved onto GPU.
             optimizers = map_collection(optimizers, self._device.optimizer_to_device)
 
         # Grad Accum
         self.adaptive_gradient_accumulation = _is_adaptive_grad_accum(grad_accum, device=self._device)
         grad_accum = _get_initial_grad_accum(grad_accum)
+        if self.adaptive_gradient_accumulation and isinstance(self._device, DeviceTPU):
+            raise NotImplementedError(f'grad_accum=auto not supported on TPUs.')
         # Dynamic time estimate for forward and backward pass. Used for monitored_barrier to avoid deadlocks
         self.batch_compute_time = 300
 
@@ -895,7 +924,10 @@ class Trainer:
         if self._train_data_spec is not None:
             self.state.set_dataloader(self._train_data_spec.dataloader, train_dataloader_label,
                                       train_subset_num_batches)
-            self.state.train_dataloader = self.state.dataloader
+            if isinstance(self._device, DeviceTPU):
+                self.state.train_dataloader = pl.MpDeviceLoader(self.state.dataloader, xm.xla_device())
+            else:
+                self.state.train_dataloader = self.state.dataloader
         self.train_metrics = _get_training_metrics(model) if compute_training_metrics else None
 
         # Max Duration
@@ -936,13 +968,13 @@ class Trainer:
                 raise ValueError('Specifying `eval_subset_num_batches` without an `eval_dataloader` has no effect.')
             if eval_interval != 1:
                 raise ValueError('Specifying `eval_interval` without an `eval_dataloader` has no effect.')
+
         self.state.evaluators = evaluators
 
         # Some algorithms require specific settings
         self._backwards_create_graph = any(map(lambda x: x.backwards_create_graph, ensure_tuple(algorithms)))
         self._find_unused_parameters = any(map(lambda x: x.find_unused_parameters, ensure_tuple(algorithms)))
         self._ddp_sync_strategy = _get_ddp_sync_strategy(ddp_sync_strategy, self._find_unused_parameters)
-
         # Configure Deepspeed
         if self.state.deepspeed_config is not None:
             try:
@@ -975,6 +1007,11 @@ class Trainer:
         # If using DeepSpeed, the model must be loaded from checkpoint after the engine has been
         # initialized, but if using PyTorch DDP, the model must be loaded before it is wrapped with
         # DDP.
+
+        # surpressing GradScaler warnings as they are always created
+        # self._use_grad_scaling() will raise a RuntimeError if grad scaling is not available when it is required
+        warnings.filterwarnings(action='ignore', message='torch.cuda.amp.GradScaler')
+        self.state.scaler = ClosureGradScaler() if self._use_closures() else GradScaler()
 
         # Load Checkpoint
         self._rng_state = None
@@ -1336,13 +1373,15 @@ class Trainer:
             self.state.grad_accum = _get_initial_grad_accum(grad_accum)
 
         # Precision
-        if precision is not None:
+        if precision is not None and Precision(precision) != self.state.precision:
             if self.deepspeed_enabled:
                 raise ValueError('Changing the precision when using DeepSpeed is not supported')
             precision = Precision(precision)
             _validate_precision(precision, self._device, self.deepspeed_enabled)
             self.state.precision = precision
 
+            # update scaler since precision was provided
+            self.state.scaler = ClosureGradScaler() if self._use_closures() else GradScaler()
         self._train_loop()
 
     def close(self):
@@ -1435,13 +1474,10 @@ class Trainer:
 
         assert self.state.dataloader is not None, 'dataloader is set in __init__() or fit()'
         assert self._train_data_spec is not None, 'The train data spec is set in __init__() or fit()'
+        assert self.state.scaler is not None, 'scaler should have been set in __init__()'
 
         self.engine.run_event(Event.FIT_START)
 
-        # surpressing GradScaler warnings as they are always created
-        # self._use_grad_scaling() will raise a RuntimeError if grad scaling is not available when it is required
-        warnings.filterwarnings(action='ignore', message='torch.cuda.amp.GradScaler')
-        self.state.scaler = ClosureGradScaler() if self._use_closures() else GradScaler()
         use_grad_scaling = self._use_grad_scaling(self.state.precision, self.state.scaler)
 
         self._spin_dataloaders()
@@ -1473,7 +1509,7 @@ class Trainer:
             if isinstance(dataloader, DataLoader) and isinstance(dataloader.sampler, DistributedSampler):
                 dataloader.sampler.set_epoch(int(self.state.timestamp.epoch))
 
-            for batch_idx, self.state.batch in enumerate(self._iter_dataloader()):
+            for batch_idx, self.state.batch in enumerate(self._iter_dataloader(TrainerMode.TRAIN)):
 
                 # if resuming, skip dataloader forward to the minibatch index
                 if batch_idx < int(self.state.timestamp.batch_in_epoch):
@@ -1661,7 +1697,10 @@ class Trainer:
                         if use_grad_scaling:
                             self.state.scaler.step(optimizer)
                         else:
-                            optimizer.step()
+                            if isinstance(self._device, DeviceTPU):
+                                xm.optimizer_step(optimizer, barrier=True)
+                            else:
+                                optimizer.step()
             except RuntimeError as e:
                 if self.adaptive_gradient_accumulation and _is_cuda_oom(e):
                     log.debug((f"Rank {dist.get_global_rank()} OOM'd."))
@@ -1685,8 +1724,9 @@ class Trainer:
             # Propagate across all ranks if any rank hit CUDA OOM
             should_handle_cuda_oom = self._device.tensor_to_device(
                 torch.tensor([should_handle_cuda_oom], dtype=torch.uint8))
-            dist.all_reduce(should_handle_cuda_oom, reduce_operation='MAX')
-            # Check if any rank hit CUDA OOM
+
+            if not isinstance(self._device, DeviceTPU):
+                dist.all_reduce(should_handle_cuda_oom, reduce_operation='MAX')
             if int(should_handle_cuda_oom.item()) == 1:
                 # If any rank hit CUDA OOM, update grad_accum and retry. Ignore any caught_timeout_error since
                 # it is likely transient, e.g. timeout because certain ranks OOMed and didn't reach barrier.
@@ -1702,7 +1742,11 @@ class Trainer:
                     warnings.warn(
                         RuntimeWarning('CUDA out of memory detected. Gradient Accumulation '
                                        f'increased from {original_grad_accum} -> {self.state.grad_accum}, '
-                                       'and the batch will be retrained.'))
+                                       'and the batch will be retrained with a '
+                                       f'micro-batchsize of {device_batch_size // self.state.grad_accum}'))
+                    # Empty cache if on GPU, which will help reduce fragmentation
+                    if isinstance(self._device, DeviceGPU):
+                        torch.cuda.empty_cache()
             # Otherwise, log grad_accum and return calculated loss
             else:
                 # Synchronize new batch compute time
@@ -1925,7 +1969,7 @@ class Trainer:
 
             self.engine.run_event(Event.PREDICT_START)
 
-            for self.state.batch in self._iter_dataloader():
+            for self.state.batch in self._iter_dataloader(TrainerMode.PREDICT):
                 # Move the batch onto the device
                 self.state.batch = self._device.batch_to_device(self.state.batch)
 
@@ -2047,7 +2091,7 @@ class Trainer:
                 # The epoch provided to `set_epoch` need not be sequential, so this is fine.
                 dataloader.sampler.set_epoch(int(self.state.timestamp.batch))
 
-            for self.state.batch in self._iter_dataloader():
+            for self.state.batch in self._iter_dataloader(TrainerMode.EVAL):
                 self.state.batch = self._device.batch_to_device(self.state.batch)
                 if data_spec.device_transforms is not None:
                     self.state.batch = data_spec.device_transforms(self.state.batch)
@@ -2130,15 +2174,15 @@ class Trainer:
                                f'Potentially your hardware does not support Precision {precision}.')
         return use_grad_scaling
 
-    def _iter_dataloader(self):
+    def _iter_dataloader(self, trainer_mode: TrainerMode):
         """Helper method to iterate over the dataloader.
 
         This method yields up to :attr:`.State.dataloader_len`` batches from the dataloader. In addition, if the
         profiler is enabled, the dataloader latency recorded via the :class:`.Marker` API.
+
+        Args:
+            trainer_mode (TrainerMode): Specifies which mode the trainer is in.
         """
-        marker = None
-        if self.state.profiler is not None:
-            marker = self.state.profiler.marker(f'dataloader/{self.state.dataloader_label}', categories=['dataloader'])
         assert self.state.dataloader is not None, 'the dataloader should be set before calling this method'
 
         if self.state.dataloader_len is None:
@@ -2147,15 +2191,21 @@ class Trainer:
             dataloader_iter = itertools.islice(self.state.dataloader, int(self.state.dataloader_len))
 
         while True:
-            if marker is not None:
-                marker.start()
             try:
+                # [BEFORE/AFTER]_DATALOADER only runs while training
+                if trainer_mode == TrainerMode.TRAIN:
+                    self.engine.run_event(Event.BEFORE_DATALOADER)
                 batch = next(dataloader_iter)
             except StopIteration:
+                # [BEFORE/AFTER]_DATALOADER only runs while training
+                if trainer_mode == TrainerMode.TRAIN:
+                    # Event.AFTER_DATALOADER is normally called in the train loop. However, if we
+                    # encounter StopIteration, the train loop will not run. Accordingly, we need to
+                    # explicitly call the engine to run marker.finish() for the dataloader marker.
+                    # Otherwise, we will encounter an error at the start of the next epoch when
+                    # Event.BEFORE_DATALOADER tries to start an unfinished marker.
+                    self.engine.run_marker_only_event(Event.AFTER_DATALOADER)
                 break
-            finally:
-                if marker is not None:
-                    marker.finish()
             yield batch
 
     def _use_closures(self) -> bool:
@@ -2165,6 +2215,9 @@ class Trainer:
         with the _step_supports_amp_closure flag.
         """
         if self.deepspeed_enabled:
+            return False
+
+        if isinstance(self._device, DeviceTPU):
             return False
 
         if self.state.precision != Precision.AMP:
